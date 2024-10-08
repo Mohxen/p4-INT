@@ -1,120 +1,66 @@
 
 # P4 Ingress Pipeline Overview
 
-This P4 program defines several tables in the ingress pipeline, each designed to handle different aspects of packet processing, such as Layer 2 forwarding, multicast, firewall functionality, routing (for both IPv4 and IPv6), Segment Routing (SRv6), and ACL (Access Control List). Here's a breakdown of each table in the ingress pipeline:
+Several tables and actions are used to handle different aspects of the packet's path, including basic forwarding, INT (In-band Network Telemetry) operations, and configuring packet processing behavior for INT reports. Let’s break down each table in the ingress pipeline:
 
-## 1. unicast Table
-- **Purpose**: Handles unicast forwarding by looking up the destination MAC address in the Ethernet header.
+## 1. `tb_forward` Table (Forward Control Block)
+- **Purpose**: This table is used to forward packets based on their destination MAC address.
 - **Key**: 
-  - `hdr.ethernet.dst_addr`: The destination MAC address.
+  - `hdr.ethernet.dstAddr`: The destination MAC address is matched using ternary matching (which allows for exact, wildcard, or range matches).
 - **Actions**: 
-  - `set_output_port`: Sets the egress port for forwarding the packet.
-  - `drop`: Drops the packet.
-  - `NoAction`: No action is taken, the packet is forwarded as is.
-- **Counters**: `unicast_counter` counts packets and bytes processed by this table.
-- **Default Action**: `NoAction`, meaning if no match is found, the packet proceeds without changes.
+  - `send_to_cpu`: Sends the packet to the CPU.
+  - `send_to_port`: Specifies the egress port to which the packet will be forwarded.
+- **Size**: This table can hold up to 31 entries.
+- **Behavior**: This table applies forwarding rules based on the destination MAC address. Depending on the match, the packet is either forwarded to a specific port or sent to the CPU.
 
-## 2. multicast Table
-- **Purpose**: Handles multicast forwarding based on the destination MAC address.
+## 2. `tb_int_reporting` Table (INT Reporting)
+- **Purpose**: Handles the generation of INT (In-band Network Telemetry) reports. When packets are identified as INT packets, this table is used to prepare and send INT reports to a specified collector.
+- **Actions**: 
+  - `send_report`: This action generates an INT report, populates it with telemetry data, and sends it to the INT collector (using the collector’s MAC address, IP address, and port).
+- **Size**: This table can hold up to 512 entries.
+- **Behavior**: The table ensures that packets containing INT headers are processed correctly and that INT reports are generated and sent to the appropriate INT collector.
+
+## 3. `tb_int_sink` Table (INT Sink Configuration)
+- **Purpose**: Configures the switch as an INT sink, which is responsible for terminating INT flows and generating INT reports. This table activates the INT sink for particular egress ports.
 - **Key**: 
-  - `hdr.ethernet.dst_addr`: The destination MAC address, matched with ternary (mask-based) matching.
+  - `standard_metadata.egress_spec`: The egress port is matched exactly to determine whether INT sink functionality should be applied.
 - **Actions**: 
-  - `set_multicast_group`: Sets the multicast group ID for forwarding the packet to multiple destinations.
-  - `drop`: Drops the packet.
-- **Counters**: `multicast_counter` tracks the packets and bytes processed by this table.
-- **Default Action**: `drop`, meaning if no match is found, the packet is dropped.
+  - `configure_sink`: This action activates the INT sink by setting a flag (`remove_int`) that instructs the egress pipeline to remove all INT headers before the packet leaves the switch. It also clones the packet to the CPU for INT reporting purposes.
+- **Size**: The table can hold up to 255 entries.
+- **Behavior**: If the packet is destined for an egress port where INT sink functionality is active, this table will apply the `configure_sink` action, enabling INT termination and INT report generation for that packet.
 
-## 3. l2_firewall Table
-- **Purpose**: Implements Layer 2 firewall functionality by checking the destination MAC address and determining whether the packet should be forwarded or dropped.
+## 4. `tb_int_transit` Table (INT Transit Configuration)
+- **Purpose**: Configures the switch as an INT transit node. Transit nodes insert metadata into the packet as it traverses the network. This table is responsible for applying the necessary INT transit logic.
+- **Actions**: 
+  - `configure_transit`: Configures the switch as an INT transit node by setting the switch ID and initializing the metadata counters for tracking the number of INT words and bytes added to packets.
+- **Behavior**: This table is used to set up the switch as an INT transit node, allowing it to insert metadata into packets that contain INT headers.
+
+## 5. `tb_int_inst_0003` Table (INT Metadata Insertion for Instructions 0-3)
+- **Purpose**: Inserts metadata based on the instructions encoded in the `instruction_mask` field of the INT header. This table handles instructions for inserting metadata related to the first four fields.
 - **Key**: 
-  - `hdr.ethernet.dst_addr`: The destination MAC address.
+  - `hdr.int_header.instruction_mask`: The instruction mask from the INT header is used for ternary matching. It determines which metadata fields should be inserted into the packet at this INT node.
 - **Actions**: 
-  - `NoAction`: No explicit forwarding or dropping action is taken, allowing the packet to pass through.
-- **Counters**: `l2_firewall_counter` counts packets and bytes passing through this table.
-- **Default Action**: `NoAction`.
+  - This table has multiple actions, each of which inserts specific metadata fields. For example:
+    - `int_set_header_0003_i0`: Inserts metadata for switch ID.
+    - `int_set_header_0003_i1`: Inserts metadata for port IDs.
+    - Other actions insert metadata for hop latency, queue occupancy, etc.
+- **Behavior**: This table ensures that the correct INT metadata is added to the packet based on the instructions in the INT header. It focuses on the first four fields of metadata.
 
-## 4. routing_v6 Table
-- **Purpose**: Performs IPv6 Layer 3 routing by looking up the destination IPv6 address and flow label to set the next hop.
+## 6. `tb_int_inst_0407` Table (INT Metadata Insertion for Instructions 4-7)
+- **Purpose**: Similar to the `tb_int_inst_0003` table, this table is responsible for inserting metadata for instructions 4 through 7. It handles additional fields for telemetry data.
 - **Key**: 
-  - `hdr.ipv6.dst_addr`: The destination IPv6 address, matched using longest prefix match (LPM).
-  - `hdr.ipv6.flow_label`: Used for advanced routing decisions, such as Equal-Cost Multi-Path (ECMP) routing (though ECMP is not fully implemented).
-  - `hdr.ipv6.src_addr`: Source IPv6 address for advanced routing decisions (selector-based match).
+  - `hdr.int_header.instruction_mask`: The instruction mask from the INT header is matched to determine which metadata fields should be added.
 - **Actions**: 
-  - `set_next_hop`: Sets the next hop's MAC address and decrements the IPv6 hop limit.
-- **Counters**: `routing_v6_counter` counts the packets and bytes processed by this table.
-- **Default Action**: No default action specified, meaning packets that do not match any entry won’t be processed further by this table.
+  - Like the `tb_int_inst_0003` table, this table has actions that insert different types of metadata. For example:
+    - `int_set_header_0407_i0`: Could insert egress timestamps.
+    - Other actions insert egress port utilization and other telemetry data.
+- **Behavior**: This table adds INT metadata fields as per the instructions in the INT header for the second set of telemetry fields.
 
-## 5. routing_v4 Table
-- **Purpose**: Performs IPv4 Layer 3 routing by looking up the destination IPv4 address to set the next hop.
+## 7. `tb_port_forward` Table (Port Forwarding)
+- **Purpose**: This table performs basic port forwarding by setting the egress port based on the ingress port or other metadata.
 - **Key**: 
-  - `hdr.ipv4.dst_addr`: The destination IPv4 address, matched using longest prefix match (LPM).
+  - `standard_metadata.egress_port`: The egress port is matched exactly.
 - **Actions**: 
-  - `set_next_hop_v4`: Sets the next hop's MAC address and decrements the IPv4 Time-to-Live (TTL).
-- **Counters**: `routing_v4_counter` counts the packets and bytes processed by this table.
-- **Default Action**: No default action specified, meaning packets that do not match any entry won’t be processed further by this table.
-
-## 6. ndp_reply_table Table
-- **Purpose**: Handles Neighbor Discovery Protocol (NDP) reply messages for IPv6 by converting Neighbor Solicitation (NS) messages into Neighbor Advertisement (NA) replies.
-- **Key**: 
-  - `hdr.ndp.target_addr`: The target IPv6 address in the NDP message, matched exactly.
-- **Actions**: 
-  - `ndp_ns_to_na`: Converts an NDP Neighbor Solicitation message into a Neighbor Advertisement by setting relevant fields (like Ethernet source/destination MAC, ICMPv6 type, NDP flags, etc.).
-- **Counters**: `ndp_reply_table_counter` counts packets and bytes processed by this table.
-- **Default Action**: No default action specified.
-
-## 7. srv6_localsid_table Table
-- **Purpose**: Handles SRv6 Local SID (Segment Identifier) processing. It matches the destination IPv6 address in the SRv6 segment header and performs segment routing functions such as SRv6 encapsulation or endpoint behavior.
-- **Key**: 
-  - `hdr.ipv6.dst_addr`: The destination IPv6 address, matched using longest prefix match (LPM).
-- **Actions**: 
-  - `srv6_end`: Marks the end of SRv6 processing.
-  - `srv6_end_x`: Handles cross-connect routing based on SRv6 segment information.
-  - `srv6_end_dx6`: Handles SRv6 decapsulation for IPv6 packets.
-  - `srv6_end_dx4`: Handles SRv6 decapsulation for IPv4 packets.
-  - `srv6_usid_un`: Encapsulates using uSID (Unstructured Segment Routing Identifier).
-  - `srv6_usid_ua`: Encapsulates using a different uSID mechanism.
-- **Counters**: `srv6_localsid_table_counter` counts packets and bytes processed by this table.
-- **Default Action**: `NoAction`.
-
-## 8. xconnect_table Table
-- **Purpose**: Handles cross-connect functionality, which directly forwards packets between ports based on specific conditions (such as in SRv6 or other scenarios).
-- **Key**: 
-  - `local_metadata.ua_next_hop`: The next hop for SRv6 cross-connect, matched using longest prefix match (LPM).
-- **Actions**: 
-  - `xconnect_act`: Sets the next hop MAC address and prepares the packet for direct forwarding.
-- **Counters**: `xconnect_table_counter` counts packets and bytes processed by this table.
-- **Default Action**: `NoAction`.
-
-## 9. srv6_encap and srv6_encap_v4 Tables
-- **Purpose**: These tables handle SRv6 encapsulation for both IPv4 and IPv6 packets.
-  - `srv6_encap`: Handles SRv6 encapsulation for IPv6 packets.
-  - `srv6_encap_v4`: Handles SRv6 encapsulation for IPv4 packets.
-- **Key**:
-  - For IPv6 (`srv6_encap`):
-    - `hdr.ipv6.dst_addr`: The destination IPv6 address, matched using LPM.
-  - For IPv4 (`srv6_encap_v4`):
-    - `hdr.ipv4.dscp`: Differentiated Services Code Point (DSCP) value, matched exactly.
-    - `hdr.ipv4.dst_addr`: The destination IPv4 address, matched using LPM.
-    - Additional fields like source/destination addresses and Layer 4 ports are used as selectors for Equal-Cost Multi-Path (ECMP) routing.
-- **Actions**: 
-  - `usid_encap_1`: Encapsulates the packet using one SRv6 segment.
-  - `usid_encap_2`: Encapsulates the packet using two SRv6 segments.
-- **Counters**: `srv6_encap_table_counter` and `srv6_encap_v4_table_counter` count packets and bytes processed by these tables.
-- **Default Action**: `NoAction`.
-
-## 10. acl Table
-- **Purpose**: Implements an Access Control List (ACL) for filtering packets based on multiple fields, including ingress port, MAC addresses, EtherType, IP protocol, ICMP type, and Layer 4 ports.
-- **Key**: 
-  - `standard_metadata.ingress_port`: Ingress port number, matched using ternary (mask-based) matching.
-  - `hdr.ethernet.dst_addr`: Destination MAC address, matched using ternary matching.
-  - `hdr.ethernet.src_addr`: Source MAC address, matched using ternary matching.
-  - `hdr.ethernet.ether_type`: EtherType field to distinguish between IPv4, IPv6, ARP, etc.
-  - `local_metadata.ip_proto`: IP protocol number (TCP, UDP, etc.), matched using ternary matching.
-  - `local_metadata.icmp_type`: ICMP type for ICMP packets.
-  - `local_metadata.l4_src_port`: Layer 4 source port (for TCP/UDP), matched using ternary matching.
-  - `local_metadata.l4_dst_port`: Layer 4 destination port (for TCP/UDP), matched using ternary matching.
-- **Actions**: 
-  - `clone_to_cpu`: Clones packets to the CPU for further inspection.
-  - `drop`: Drops the packet.
-- **Counters**: `acl_counter` tracks packets and bytes processed by this table.
-- **Default Action**: No default action specified.
+  - `send`: Sets the egress port for the packet.
+- **Size**: This table can hold up to 31 entries.
+- **Behavior**: This table determines the outgoing port for the packet. If no forwarding decision has been made yet, this table will ensure that the packet is sent to the correct egress port.
