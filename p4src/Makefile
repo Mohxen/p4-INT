@@ -5,7 +5,7 @@ BMV2_PP_FLAGS=-DTARGET_BMV2 -DCPU_PORT=${BMV2_CPU_PORT}
 
 all: build
 
-build: main.p4
+build: INT.p4
 	$(info ************ COMPILING P4 PROGRAM ************)
 	mkdir -p $(OUT_DIR)
 	$(P4C_BM_EXE) --arch v1model -o $(OUT_DIR)/bmv2.json \
